@@ -1,0 +1,12 @@
+{
+  "name": "luffaguard",
+  "version": "1.0.0",
+  "description": "Luffa aegyptiaca Leaf Disease Detection",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "build": "npm install --prefix frontend && npm run build --prefix frontend && pip install -r requirements.txt --quiet",
+    "start": "python backend/app.py"
+  }
+}
