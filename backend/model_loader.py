@@ -28,7 +28,7 @@ def _download(file_id: str, dest: str, name: str):
     """
     url = f'https://drive.google.com/uc?id={file_id}'
     print(f'⬇  Downloading {name} from Google Drive …')
-    gdown.download(url, dest, quiet=False, fuzzy=True)
+    gdown.download(url, dest, quiet=False)
     if not os.path.exists(dest) or os.path.getsize(dest) < 1024:
         raise RuntimeError(
             f'Download failed for {name}.\n'

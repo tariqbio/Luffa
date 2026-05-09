@@ -2,4 +2,4 @@ flask>=3.0
 tensorflow-cpu>=2.15
 Pillow>=10.0
 numpy>=1.24
-gdown>=5.1
+gdown>=4.4.0
