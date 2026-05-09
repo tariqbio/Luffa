@@ -36,6 +36,7 @@ function Header() {
 function UploadView({ onFile }) {
   const [drag, setDrag] = useState(false);
   const inp = useRef();
+  const cam = useRef();
   const handle = f => f?.type.startsWith('image/') && onFile(f);
 
   return (
@@ -77,17 +78,28 @@ function UploadView({ onFile }) {
             {drag ? 'Release to analyse' : 'Drop a leaf image here'}
           </h3>
           <p className="drop-zone__sub">
-            Drag & drop a photograph of a <span>Luffa aegyptiaca</span> leaf<br />
-            or browse your files · JPG, PNG, WebP supported
+            Drag & drop a <span>Luffa aegyptiaca</span> leaf photo, or use a button below
           </p>
-          <div className="drop-zone__btn">
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-              <path d="M8 2v9M4 7l4-4 4 4" strokeLinecap="round" strokeLinejoin="round"/>
-              <path d="M2 13h12" strokeLinecap="round"/>
-            </svg>
-            Choose Image
+          <div className="drop-zone__actions">
+            <div className="drop-zone__btn" onClick={e => { e.stopPropagation(); inp.current.click(); }}>
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M8 2v9M4 7l4-4 4 4" strokeLinecap="round" strokeLinejoin="round"/>
+                <path d="M2 13h12" strokeLinecap="round"/>
+              </svg>
+              Choose File
+            </div>
+            <div className="drop-zone__btn drop-zone__btn--cam" onClick={e => { e.stopPropagation(); cam.current.click(); }}>
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <rect x="1" y="4" width="14" height="10" rx="2" />
+                <circle cx="8" cy="9" r="2.5" />
+                <path d="M5 4l1-2h4l1 2" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+              Take Photo
+            </div>
           </div>
           <input ref={inp} type="file" accept="image/*" style={{ display:'none' }}
+            onChange={e => handle(e.target.files[0])} />
+          <input ref={cam} type="file" accept="image/*" capture="environment" style={{ display:'none' }}
             onChange={e => handle(e.target.files[0])} />
         </div>
       </div>
