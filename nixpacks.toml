@@ -1,0 +1,15 @@
+[phases.setup]
+nixPkgs = ["nodejs_20", "python312", "python312Packages.pip"]
+
+[phases.install]
+cmds = ["npm i"]
+
+[phases.build]
+cmds = [
+  "npm install --prefix frontend",
+  "npm run build --prefix frontend",
+  "pip3 install -r requirements.txt --quiet --break-system-packages"
+]
+
+[start]
+cmd = "python3 backend/app.py"
