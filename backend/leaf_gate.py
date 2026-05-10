@@ -1,13 +1,15 @@
 """
 leaf_gate.py — Two-layer input validation (pure classical image processing)
 
-Layer 1: HSV colour-range gate
-  Counts pixels in the plant-green HSV band.
-  No external model — pure PIL + NumPy. Fully claimable in a research paper
-  as a preprocessing validation step.
+Layer 1: HSV colour-range gate  +  spatial coverage check
+  Counts green pixels AND verifies they are spatially spread across the frame.
+  A leaf covers most of the image. A green pen covers only a thin strip.
 
 Layer 2: Entropy + model-agreement suspicion flag
   Operates on outputs of the author's own trained models only.
+
+Both layers are academically claimable as preprocessing steps —
+no external model, no third-party weights.
 """
 
 import io, math
@@ -16,95 +18,87 @@ from PIL import Image
 
 
 # ── Layer 1: HSV plant-green gate ────────────────────────────────────────────
-#
-# Plant leaves occupy a well-defined HSV region:
-#   Hue        30° – 165°   (yellow-green through blue-green)
-#   Saturation 25% – 100%   (excludes washed-out / grey pixels)
-#   Value      10% – 95%    (excludes near-black and blown-out white)
-#
-# A shopping bag, face, document, etc. will have very few pixels in this band.
-# A luffa leaf — even a diseased, yellowing one — will have many.
+HSV_HUE_LOW     = 30  / 360    # yellow-green
+HSV_HUE_HIGH    = 165 / 360    # blue-green
+HSV_SAT_MIN     = 0.25
+HSV_VAL_MIN     = 0.10
+HSV_VAL_MAX     = 0.95
 
-HSV_HUE_LOW   = 30   / 360   # normalised 0-1
-HSV_HUE_HIGH  = 165  / 360
-HSV_SAT_MIN   = 0.25
-HSV_VAL_MIN   = 0.10
-HSV_VAL_MAX   = 0.95
-PLANT_THRESHOLD = 0.15        # 15 % of pixels must be in the green band
+PLANT_THRESHOLD   = 0.22   # raised from 0.15 → rejects 18-21% green objects (pens, bags)
+COVERAGE_GRID     = 4      # divide image into 4×4 = 16 regions
+COVERAGE_MIN_FRAC = 0.10   # each qualifying region must have ≥10 % green pixels
+COVERAGE_MIN_REGS = 5      # at least 5 of 16 regions must qualify → rejects thin objects
 
 
-def check_is_plant(image_bytes: bytes, threshold: float = PLANT_THRESHOLD):
-    """
-    Returns (is_plant: bool, plant_score: float 0-100)
-
-    plant_score = percentage of pixels that fall inside the plant-green HSV band.
-    Runs in ~5 ms on a 224×224 thumbnail — no model, no network call.
-    """
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    img = img.resize((128, 128), Image.LANCZOS)   # thumbnail for speed
-
-    hsv = np.array(img, dtype=np.float32) / 255.0  # shape (128, 128, 3) in RGB
-
-    # Convert RGB → HSV (vectorised, no OpenCV needed)
-    r, g, b = hsv[..., 0], hsv[..., 1], hsv[..., 2]
-    cmax = np.max(hsv, axis=-1)
-    cmin = np.min(hsv, axis=-1)
+def _rgb_to_hsv(arr: np.ndarray):
+    """Vectorised RGB→HSV. arr: (H,W,3) float32 in [0,1]. Returns h,s,v each (H,W)."""
+    r, g, b = arr[...,0], arr[...,1], arr[...,2]
+    cmax  = np.max(arr, axis=-1)
+    cmin  = np.min(arr, axis=-1)
     delta = cmax - cmin
-
-    # Value
     v = cmax
-
-    # Saturation (avoid div-by-zero)
     s = np.where(cmax > 0, delta / cmax, 0.0)
+    with np.errstate(invalid='ignore', divide='ignore'):
+        h = np.where(delta == 0, 0.0,
+            np.where(cmax == r, ((g - b) / delta) % 6,
+            np.where(cmax == g,  (b - r) / delta + 2,
+                                 (r - g) / delta + 4))) / 6.0
+    return h, s, v
 
-    # Hue (0-1 scale, 0 = red, 1/3 = green, 2/3 = blue)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        h = np.where(
-            delta == 0, 0.0,
-            np.where(
-                cmax == r, ((g - b) / delta) % 6,
-                np.where(
-                    cmax == g, (b - r) / delta + 2,
-                    (r - g) / delta + 4
-                )
-            )
-        ) / 6.0
 
-    # Count pixels in the plant-green band
+def check_is_plant(image_bytes: bytes,
+                   threshold: float = PLANT_THRESHOLD):
+    """
+    Returns (is_plant: bool, plant_score: float 0–100).
+
+    Two-signal check:
+      1. Global green pixel ratio ≥ threshold
+      2. Green pixels spread across ≥ COVERAGE_MIN_REGS grid regions
+         (rejects thin green objects like pens, rulers, bags with green strip)
+
+    Runs in ~6 ms on a 128×128 thumbnail. No model, no network call.
+    """
+    img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+    img = img.resize((128, 128), Image.LANCZOS)
+    arr = np.array(img, np.float32) / 255.0   # (128, 128, 3)
+
+    h, s, v = _rgb_to_hsv(arr)
+
     in_band = (
-        (h  >= HSV_HUE_LOW)  & (h  <= HSV_HUE_HIGH) &
-        (s  >= HSV_SAT_MIN)  &
-        (v  >= HSV_VAL_MIN)  & (v  <= HSV_VAL_MAX)
+        (h >= HSV_HUE_LOW) & (h <= HSV_HUE_HIGH) &
+        (s >= HSV_SAT_MIN) &
+        (v >= HSV_VAL_MIN) & (v <= HSV_VAL_MAX)
     )
-    plant_score = float(in_band.mean())   # fraction 0-1
 
-    return plant_score >= threshold, round(plant_score * 100, 1)
+    plant_score = float(in_band.mean())   # global fraction
+
+    # ── Spatial coverage check ──────────────────────────────────────────────
+    # Split into COVERAGE_GRID × COVERAGE_GRID regions, count qualifying ones.
+    G   = COVERAGE_GRID
+    sz  = 128 // G  # region size in pixels
+    qualifying_regions = 0
+    for row in range(G):
+        for col in range(G):
+            region = in_band[row*sz:(row+1)*sz, col*sz:(col+1)*sz]
+            if region.mean() >= COVERAGE_MIN_FRAC:
+                qualifying_regions += 1
+
+    spatially_distributed = qualifying_regions >= COVERAGE_MIN_REGS
+
+    is_plant = (plant_score >= threshold) and spatially_distributed
+
+    return is_plant, round(plant_score * 100, 1)
 
 
 # ── Layer 2: Entropy / suspicion flag ────────────────────────────────────────
-#
-# The softmax problem: a closed classifier *must* output probabilities that sum
-# to 1, so it forces every input — including a shopping bag — into one of its
-# known classes with fake confidence.
-#
-# We flag results where BOTH signals fire simultaneously:
-#   • Normalised Shannon entropy < 0.12  (model is extremely certain)
-#   • CNN and CNN-ViT Hybrid agree within 2 pp  (suspiciously identical)
-#
-# Flagging two independent signals reduces false alarms on genuine high-
-# confidence leaf images while catching most OOD inputs that slip through.
-
 def compute_suspicion(pc: list, ph: list, pe: list):
     """
-    Returns (is_suspicious: bool, flags: list[str], entropy: float)
-
-    pc / ph / pe — probability lists (one value per class) from CNN,
-                   Hybrid, and Ensemble respectively.
+    Returns (is_suspicious: bool, flags: list[str], entropy: float).
+    Fires when the model is unusually certain AND both sub-models agree too closely.
     """
     flags    = []
     pred_idx = int(np.argmax(pe))
 
-    # Normalised Shannon entropy (0 = fully certain, 1 = uniform)
     entropy      = -sum(p * math.log(p + 1e-10) for p in pe)
     norm_entropy = entropy / math.log(len(pe))
 
@@ -113,14 +107,10 @@ def compute_suspicion(pc: list, ph: list, pe: list):
     conf_hybrid = ph[pred_idx]
 
     if conf_ens > 0.90 and norm_entropy < 0.12:
-        flags.append("extremely_low_entropy")
-
+        flags.append('extremely_low_entropy')
     if abs(conf_cnn - conf_hybrid) < 0.02 and conf_ens > 0.88:
-        flags.append("suspiciously_identical_outputs")
-
+        flags.append('suspiciously_identical_outputs')
     if conf_ens > 0.95 and norm_entropy < 0.08:
-        flags.append("near_zero_entropy")
+        flags.append('near_zero_entropy')
 
-    is_suspicious = len(flags) >= 2
-
-    return is_suspicious, flags, round(norm_entropy, 4)
+    return len(flags) >= 2, flags, round(norm_entropy, 4)
