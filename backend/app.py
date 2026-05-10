@@ -7,9 +7,10 @@ import numpy as np
 
 from model_loader import ensure_models
 from disease_info  import LABELS, DISEASE_INFO
+from leaf_gate     import check_is_plant, compute_suspicion
 
 # ── Boot ────────────────────────────────────────────────────────────────────
-print('\n🌿 LuffaGuard starting …')
+print('\n🌿 TariqCViT starting …')
 cnn_path, hybrid_path = ensure_models()
 DEMO_MODE = (cnn_path is None)
 
@@ -24,17 +25,19 @@ if not DEMO_MODE:
     hybrid_model = tf.keras.models.load_model(hybrid_path)
     print('✅ Both models ready.\n')
 
+# HSV gate runs in-process — no warmup needed
+
 # ── Flask ────────────────────────────────────────────────────────────────────
 FRONTEND_DIST = os.path.join(os.path.dirname(__file__), '..', 'frontend', 'dist')
 app = Flask(__name__, static_folder=FRONTEND_DIST, static_url_path='')
 
-IMG_SIZE = 224   # matches training exactly
+IMG_SIZE = 224
 
 def preprocess(image_bytes):
     img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
     img = img.resize((IMG_SIZE, IMG_SIZE), Image.LANCZOS)
     arr = np.array(img, dtype=np.float32) / 255.0
-    return arr[np.newaxis, ...]   # (1, 224, 224, 3)
+    return arr[np.newaxis, ...]
 
 def run_inference(image_bytes):
     if DEMO_MODE:
@@ -59,6 +62,9 @@ def run_inference(image_bytes):
     def fmt(probs):
         return {LABELS[i]: round(p * 100, 2) for i, p in enumerate(probs)}
 
+    # ── Layer 2: entropy / suspicion flag ───────────────────────────────────
+    is_suspicious, suspicion_flags, entropy = compute_suspicion(pc, ph, pe)
+
     return {
         'label':          label,
         'confidence':     round(pe[pred_idx] * 100, 2),
@@ -67,8 +73,12 @@ def run_inference(image_bytes):
             'hybrid':   fmt(ph),
             'ensemble': fmt(pe),
         },
-        'disease_info': DISEASE_INFO[label],
-        'demo_mode':    DEMO_MODE,
+        'disease_info':    DISEASE_INFO[label],
+        'demo_mode':       DEMO_MODE,
+        # validation metadata
+        'suspicious':      is_suspicious,
+        'suspicion_flags': suspicion_flags,
+        'entropy':         entropy,
     }
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -85,14 +95,29 @@ def predict():
     image_bytes = file.read()
 
     try:
-        result = run_inference(image_bytes)
+        # ── Layer 1: HSV colour-range plant gate ──────────────────────────────
+        is_plant, plant_score, top_labels = check_is_plant(image_bytes)
 
-        # Encode image so the frontend can display it back
+        if not is_plant:
+            return jsonify({
+                'rejected':    True,
+                'reason':      'No luffa leaf detected in this image.',
+                'plant_score': plant_score,
+                'top_labels':  top_labels,
+                'hint':        'Please upload a clear photo of a Luffa aegyptiaca leaf.',
+            }), 200   # 200 so the frontend handles it gracefully, not as an error
+
+        # ── Run disease inference ────────────────────────────────────────────
+        result = run_inference(image_bytes)
+        result['plant_score'] = plant_score   # expose for frontend badge
+
+        # Encode image for display
         ext  = (file.filename or 'img.jpg').rsplit('.', 1)[-1].lower()
         mime = f'image/{ext}' if ext in ('png', 'gif', 'webp') else 'image/jpeg'
         result['image_b64'] = f'data:{mime};base64,{base64.b64encode(image_bytes).decode()}'
 
         return jsonify(result)
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

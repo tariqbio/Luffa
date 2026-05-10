@@ -1,6 +1,31 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { predictDisease } from './api.js';
 
+
+/* ── Green-pixel leaf pre-check (runs in browser before any API call) ─── */
+function analyseGreenPixels(file) {
+  return new Promise(resolve => {
+    const img = new window.Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 64; canvas.height = 64;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, 64, 64);
+      const data = ctx.getImageData(0, 0, 64, 64).data;
+      let green = 0, total = data.length / 4;
+      for (let i = 0; i < data.length; i += 4) {
+        const [r, g, b] = [data[i], data[i+1], data[i+2]];
+        if (g > r * 1.08 && g > b * 1.08 && g > 45) green++;
+      }
+      URL.revokeObjectURL(url);
+      resolve(Math.round((green / total) * 100));  // 0-100
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(50); }; // fail-open
+    img.src = url;
+  });
+}
+
 const STEPS = [
   'Preprocessing — 224×224 resize, normalise to [0,1]',
   'CNN inference — 4-block convolutional network',
@@ -65,8 +90,8 @@ function Header() {
         <div className="logo">
           <div className="logo__icon">🌿</div>
           <div>
-            <div className="logo__name">LuffaGuard</div>
-            <div className="logo__tag">Leaf Disease Detection</div>
+            <div className="logo__name">TariqCViT</div>
+            <div className="logo__tag">Luffa Disease Detection</div>
           </div>
         </div>
         <div className="status-pill">
@@ -98,8 +123,8 @@ function UploadView({ onFile }) {
         </p>
         <div className="hero__pills anim anim-3">
           <span className="tag tag--neutral">Ensemble Model</span>
-          <span className="tag tag--neutral">CNN · 99.19%</span>
-          <span className="tag tag--neutral">CNN-ViT · 99.51%</span>
+          <span className="tag tag--neutral">CNN validated · 99.19%</span>
+          <span className="tag tag--neutral">CNN-ViT validated · 99.51%</span>
           <span className="tag tag--neutral">6,166 images</span>
           <span className="tag tag--neutral">2 disease classes</span>
         </div>
@@ -107,7 +132,7 @@ function UploadView({ onFile }) {
 
       <div className="stats-bar anim anim-4">
         {[
-          { icon:'🤖', val:'99.51%', lbl:'Best model accuracy' },
+          { icon:'🤖', val:'99.51%', lbl:'Validated model accuracy' },
           { icon:'🗂',  val:'6,166',  lbl:'Training images' },
           { icon:'🔬', val:'2',       lbl:'Disease classes detected' },
         ].map(s => (
@@ -200,7 +225,7 @@ function ResultView({ data, onReset, addToast }) {
 
   const download = () => {
     const txt = [
-      'LuffaGuard Disease Report','',
+      'TariqCViT Disease Report','',
       `Detection: ${data.label}`,`Confidence: ${data.confidence}%`,
       `Scientific Name: ${di.scientific_name}`,`Urgency: ${di.urgency}`,'',
       `CNN:      ${prob.cnn[data.label]}%`,
@@ -214,7 +239,7 @@ function ResultView({ data, onReset, addToast }) {
     ].join('\n');
     const a = Object.assign(document.createElement('a'), {
       href: URL.createObjectURL(new Blob([txt],{type:'text/plain'})),
-      download: `LuffaGuard_${data.label.replace(' ','_')}.txt`,
+      download: `TariqCViT_${data.label.replace(' ','_')}.txt`,
     });
     a.click();
     addToast({ icon:'📄', msg:'Report downloaded' });
@@ -258,6 +283,22 @@ function ResultView({ data, onReset, addToast }) {
       </div>
 
       {data.demo_mode && <div className="demo-warn">⚠ Demo mode — set CNN_DRIVE_ID &amp; HYBRID_DRIVE_ID env vars for real predictions.</div>}
+      {data.suspicious && (
+        <div className="suspicion-warn">
+          <span>⚠️</span>
+          <div>
+            <strong>Reliability flag:</strong> Both models output near-identical, extremely high confidence —
+            a pattern also seen with non-leaf inputs. Verify visually before acting on this result.
+            <span className="sw-flags">{(data.suspicion_flags||[]).map(f=><span key={f} className="sw-tag">{f.replace(/_/g,' ')}</span>)}</span>
+          </div>
+        </div>
+      )}
+      {/* Leaf-only disclaimer */}
+      <div className="leaf-warn">
+        <span>🍃</span>
+        <span>This model is trained exclusively on <em>Luffa aegyptiaca</em> leaves. Uploading unrelated images (objects, people, other plants) will still produce a classification — treat results critically if the image is not a luffa leaf.</span>
+      </div>
+
 
       {/* Verdict */}
       <div className="verdict anim">
@@ -358,13 +399,15 @@ function ResultView({ data, onReset, addToast }) {
 }
 
 /* ── App ────────────────────────────────────────── */
-const VIEW = {UPLOAD:'upload',SCAN:'scan',RESULT:'result'};
+const VIEW = {UPLOAD:'upload',SCAN:'scan',RESULT:'result',REJECTED:'rejected'};
 export default function App() {
   const [view,    setView]    = useState(VIEW.UPLOAD);
   const [preview, setPreview] = useState(null);
   const [step,    setStep]    = useState(0);
   const [result,  setResult]  = useState(null);
   const [toasts,  setToasts]  = useState([]);
+  const [greenWarn, setGreenWarn] = useState(null);  // {file, ratio}
+  const [rejected,  setRejected]  = useState(null);  // backend rejection data
 
   const addToast = useCallback(({icon='✅',msg})=>{
     const id = Date.now();
@@ -373,12 +416,30 @@ export default function App() {
   },[]);
 
   const handleFile = useCallback(async file => {
+    // Layer 1 (browser): green-pixel check
+    const greenRatio = await analyseGreenPixels(file);
+    if (greenRatio < 12) {
+      setGreenWarn({ file, ratio: greenRatio });
+      return;  // pause — show warning, let user decide
+    }
+    await runPrediction(file);
+  },[addToast]);
+
+  const runPrediction = useCallback(async file => {
+    setGreenWarn(null);
     setStep(0); setPreview(URL.createObjectURL(file)); setView(VIEW.SCAN);
     window.scrollTo({top:0,behavior:'smooth'});
     const timer = setInterval(()=>setStep(s=>s<STEPS.length-1?s+1:s),700);
     try {
       const [data] = await Promise.all([predictDisease(file), new Promise(r=>setTimeout(r,3600))]);
-      clearInterval(timer); setStep(STEPS.length); setResult(data); setView(VIEW.RESULT);
+      clearInterval(timer);
+      if (data.rejected) {
+        setRejected(data); setView(VIEW.REJECTED);
+        addToast({icon:'🚫', msg:'Image rejected — no luffa leaf detected'});
+        return;
+      }
+      setStep(STEPS.length); setResult(data); setView(VIEW.RESULT);
+      if (data.suspicious) addToast({icon:'⚠️', msg:'Result flagged: model outputs look abnormally certain'});
       addToast({icon:data.demo_mode?'⚠️':'✅',msg:data.demo_mode?'Demo mode — simulated result':`Detected: ${data.label} (${data.confidence}%)`});
     } catch(e) {
       clearInterval(timer); setView(VIEW.UPLOAD);
@@ -387,7 +448,7 @@ export default function App() {
   },[addToast]);
 
   const handleReset = useCallback(()=>{
-    setView(VIEW.UPLOAD); setResult(null); setPreview(null); setStep(0);
+    setView(VIEW.UPLOAD); setResult(null); setPreview(null); setStep(0); setRejected(null); setGreenWarn(null);
     window.scrollTo({top:0,behavior:'smooth'});
   },[]);
 
@@ -396,10 +457,39 @@ export default function App() {
       <Header/>
       {view===VIEW.UPLOAD && <UploadView onFile={handleFile}/>}
       {view===VIEW.SCAN   && <ScanView preview={preview} step={step}/>}
-      {view===VIEW.RESULT && <ResultView data={result} onReset={handleReset} addToast={addToast}/>}
+      {view===VIEW.RESULT   && <ResultView data={result} onReset={handleReset} addToast={addToast}/>}
+      {view===VIEW.REJECTED && <RejectedView data={rejected} onReset={handleReset}/>}
+      {greenWarn && (
+        <div className="modal-overlay" onClick={()=>setGreenWarn(null)}>
+          <div className="modal gw-modal" onClick={e=>e.stopPropagation()}>
+            <div className="modal__head">
+              <div>
+                <div className="modal__title">⚠️ Low plant content detected</div>
+                <div className="modal__sub">Only {greenWarn.ratio}% green pixels — this might not be a leaf</div>
+              </div>
+              <button className="modal__close" onClick={()=>setGreenWarn(null)}>✕</button>
+            </div>
+            <div className="modal__body">
+              <p style={{fontSize:13,color:'var(--text2)',lineHeight:1.7,marginBottom:20}}>
+                The browser scan found very little green content in your image. This model only
+                works on <em>Luffa aegyptiaca</em> leaves — results on other images are meaningless.
+              </p>
+              <div style={{display:'flex',gap:10}}>
+                <button className="btn btn--primary" style={{flex:1}} onClick={()=>runPrediction(greenWarn.file)}>
+                  Proceed anyway
+                </button>
+                <button className="btn btn--secondary" style={{flex:1}} onClick={()=>setGreenWarn(null)}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       <footer className="footer">
         <div className="wrap footer__inner">
-          <span>LuffaGuard · Luffa aegyptiaca Disease Detection</span>
+          <span>TariqCViT · Luffa aegyptiaca Disease Detection</span>
+          <span style={{color:'var(--text3)'}}>Built by <strong style={{color:'var(--text2)',fontWeight:600}}>Tariq</strong></span>
           <a href="https://doi.org/10.17632/nym8bw5hr6.3" target="_blank" rel="noreferrer">Dataset: 10.17632/nym8bw5hr6.3</a>
         </div>
       </footer>
