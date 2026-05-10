@@ -1,8 +1,0 @@
-{
-  "name": "luffaguard",
-  "version": "1.0.0",
-  "scripts": {
-    "build": "npm install --prefix frontend && npm run build --prefix frontend",
-    "start": "python3 backend/app.py"
-  }
-}
